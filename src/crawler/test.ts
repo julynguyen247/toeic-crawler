@@ -544,41 +544,46 @@ function replaceNormalizedTest(
     }
 
     for (const downloaded of downloadedMedia) {
-      const row = tx
-        .insert(media)
-        .values({
-          provider: downloaded.provider,
-          bucket: downloaded.bucket,
-          objectPath: downloaded.objectPath,
-          canonicalUrl: downloaded.canonicalUrl,
-          localPath: downloaded.localPath,
-          mediaType: downloaded.mediaType,
-          mimeType: downloaded.mimeType,
-          sha256: downloaded.sha256,
-          byteSize: downloaded.byteSize,
-          downloadStatus: downloaded.downloadStatus,
-          lastDownloadedAt:
-            downloaded.downloadStatus === "complete"
-              ? new Date().toISOString()
-              : null,
-        })
-        .onConflictDoUpdate({
-          target: [media.provider, media.bucket, media.objectPath],
-          set: {
-            canonicalUrl: downloaded.canonicalUrl,
-            localPath: downloaded.localPath,
-            mimeType: downloaded.mimeType,
-            sha256: downloaded.sha256,
-            byteSize: downloaded.byteSize,
-            downloadStatus: downloaded.downloadStatus,
-            lastDownloadedAt:
-              downloaded.downloadStatus === "complete"
-                ? new Date().toISOString()
-                : null,
-          },
-        })
-        .returning({ id: media.id })
+      const values = {
+        provider: downloaded.provider,
+        bucket: downloaded.bucket,
+        objectPath: downloaded.objectPath,
+        canonicalUrl: downloaded.canonicalUrl,
+        localPath: downloaded.localPath,
+        mediaType: downloaded.mediaType,
+        mimeType: downloaded.mimeType,
+        sha256: downloaded.sha256,
+        byteSize: downloaded.byteSize,
+        downloadStatus: downloaded.downloadStatus,
+        lastDownloadedAt:
+          downloaded.downloadStatus === "complete"
+            ? new Date().toISOString()
+            : null,
+      };
+      let row = tx
+        .select({ id: media.id })
+        .from(media)
+        .where(eq(media.canonicalUrl, downloaded.canonicalUrl))
         .get();
+      if (row) {
+        tx.update(media).set(values).where(eq(media.id, row.id)).run();
+      } else if (
+        downloaded.provider === "supabase-storage" &&
+        downloaded.bucket &&
+        downloaded.objectPath
+      ) {
+        row = tx
+          .insert(media)
+          .values(values)
+          .onConflictDoUpdate({
+            target: [media.provider, media.bucket, media.objectPath],
+            set: values,
+          })
+          .returning({ id: media.id })
+          .get();
+      } else {
+        row = tx.insert(media).values(values).returning({ id: media.id }).get();
+      }
       for (const reference of downloaded.references) {
         const entityId =
           reference.entityType === "question"

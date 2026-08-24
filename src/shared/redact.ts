@@ -10,10 +10,25 @@ const sensitiveQueryKeys = new Set([
 ]);
 
 export const REDACTED = "[REDACTED]";
+export const REDACTION_VERSION = 2;
 
 export function sanitizeUrl(input: string): string {
+  const isAbsolute = /^https?:\/\//i.test(input);
+  const isProtocolRelative = input.startsWith("//");
+  const hasRelativeSensitiveQuery =
+    !/[\s\r\n]/.test(input) &&
+    /[?&](?:[^=&]*(?:signature|token)|sig|x-amz-signature)=/i.test(input);
+  if (!isAbsolute && !isProtocolRelative && !hasRelativeSensitiveQuery) {
+    return input;
+  }
   try {
-    const url = new URL(input);
+    const url = isAbsolute
+      ? new URL(input)
+      : new URL(
+          isProtocolRelative ? `https:${input}` : input,
+          "https://redact.invalid/",
+        );
+    let changed = false;
     for (const key of [...url.searchParams.keys()]) {
       const normalized = key.toLowerCase();
       if (
@@ -22,9 +37,20 @@ export function sanitizeUrl(input: string): string {
         normalized.includes("token")
       ) {
         url.searchParams.set(key, REDACTED);
+        changed = true;
       }
     }
-    return url.toString();
+    if (!changed) {
+      return input;
+    }
+    if (isAbsolute) {
+      return url.toString();
+    }
+    if (isProtocolRelative) {
+      return `//${url.host}${url.pathname}${url.search}${url.hash}`;
+    }
+    const relative = `${url.pathname}${url.search}${url.hash}`;
+    return input.startsWith("/") ? relative : relative.replace(/^\//, "");
   } catch {
     return input;
   }

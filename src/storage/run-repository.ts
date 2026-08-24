@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { eq } from "drizzle-orm";
 import type { AppConfig } from "../config.js";
+import { REDACTION_VERSION } from "../shared/redact.js";
 import { openDatabase } from "./database.js";
 import { crawlRuns, sourceSnapshots } from "./schema.js";
 
@@ -59,6 +60,7 @@ export function recordSnapshot(
       entitySourceId: values.entitySourceId,
       payloadPath: values.payloadPath,
       payloadSha256: values.payloadSha256,
+      redactionVersion: REDACTION_VERSION,
     })
     .onConflictDoNothing()
     .run();

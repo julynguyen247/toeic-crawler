@@ -2,6 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
+import { REDACTION_VERSION } from "../shared/redact.js";
 import { openDatabase } from "./database.js";
 
 export interface ValidationResult {
@@ -9,6 +10,7 @@ export interface ValidationResult {
   foreignKeyViolations: unknown[];
   missingMediaFiles: string[];
   checksumMismatches: string[];
+  untrackedMediaFiles: string[];
   completeness: {
     incompleteTests: ValidationIssueSummary;
     unreferencedQuestionGroups: ValidationIssueSummary;
@@ -16,6 +18,9 @@ export interface ValidationResult {
     missingSourcePayloads: ValidationIssueSummary;
     missingMediaLinks: ValidationIssueSummary;
     incompleteLinkedMedia: ValidationIssueSummary;
+    incorrectMissingFlags: ValidationIssueSummary;
+    outdatedLatestTestSnapshots: ValidationIssueSummary;
+    duplicateCanonicalMedia: ValidationIssueSummary;
   };
 }
 
@@ -44,8 +49,10 @@ export function validateDatabase(config: AppConfig): ValidationResult {
       .all() as Array<{ local_path: string; sha256: string | null }>;
     const missingMediaFiles: string[] = [];
     const checksumMismatches: string[] = [];
+    const trackedMediaFiles = new Set<string>();
     for (const row of mediaRows) {
       const absolutePath = path.resolve(config.cwd, row.local_path);
+      trackedMediaFiles.add(absolutePath);
       if (!fs.existsSync(absolutePath)) {
         missingMediaFiles.push(row.local_path);
         continue;
@@ -60,6 +67,14 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         }
       }
     }
+    const untrackedMediaFiles = fs.existsSync(config.mediaDir)
+      ? fs
+          .readdirSync(config.mediaDir, { withFileTypes: true })
+          .filter((entry) => entry.isFile())
+          .map((entry) => path.join(config.mediaDir, entry.name))
+          .filter((filePath) => !trackedMediaFiles.has(filePath))
+          .map((filePath) => path.relative(config.cwd, filePath))
+      : [];
     const testRows = sqlite
       .prepare(
         `SELECT t.id, t.title, t.question_count AS expected_questions,
@@ -177,11 +192,54 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         )
         .all() as Array<{ value: string }>
     ).map((row) => row.value);
+    const incorrectMissingFlags = (
+      sqlite
+        .prepare(
+          `SELECT t.source_id AS value
+           FROM tests t
+           JOIN collections c ON c.id = t.collection_id
+           WHERE c.source_id = 'accessible-question-bank'
+             AND t.missing_from_source = 1`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const outdatedLatestTestSnapshots = (
+      sqlite
+        .prepare(
+          `SELECT t.source_id AS value
+           FROM tests t
+           LEFT JOIN (
+             SELECT ss.entity_source_id, ss.redaction_version
+             FROM source_snapshots ss
+             JOIN (
+               SELECT entity_source_id, MAX(id) AS max_id
+               FROM source_snapshots
+               WHERE entity_type = 'test'
+               GROUP BY entity_source_id
+             ) latest ON latest.max_id = ss.id
+           ) snapshot ON snapshot.entity_source_id = t.source_id
+           WHERE snapshot.redaction_version IS NULL
+              OR snapshot.redaction_version != ?`,
+        )
+        .all(REDACTION_VERSION) as Array<{ value: string }>
+    ).map((row) => row.value);
+    const duplicateCanonicalMedia = (
+      sqlite
+        .prepare(
+          `SELECT canonical_url AS value
+           FROM media
+           WHERE canonical_url IS NOT NULL
+           GROUP BY canonical_url
+           HAVING COUNT(*) > 1`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
     return {
       integrity: integrityRow.integrity_check,
       foreignKeyViolations,
       missingMediaFiles,
       checksumMismatches,
+      untrackedMediaFiles,
       completeness: {
         incompleteTests: summarize(incompleteTests),
         unreferencedQuestionGroups: summarize(unreferencedQuestionGroups),
@@ -189,6 +247,9 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         missingSourcePayloads: summarize(missingSourcePayloads),
         missingMediaLinks: summarize(missingMediaLinks),
         incompleteLinkedMedia: summarize(incompleteLinkedMedia),
+        incorrectMissingFlags: summarize(incorrectMissingFlags),
+        outdatedLatestTestSnapshots: summarize(outdatedLatestTestSnapshots),
+        duplicateCanonicalMedia: summarize(duplicateCanonicalMedia),
       },
     };
   } finally {

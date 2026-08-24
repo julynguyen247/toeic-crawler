@@ -111,7 +111,7 @@ npm run export-tests -- --output-dir data/exports/tests
 
 `export-tests` tạo một file JSON lồng sẵn cho mỗi đề và `manifest.json` để tra danh sách. Schema export v3 giữ cả các cột normalized lẫn object `sourcePayload` nguyên bản cho test, passage và question. Trong mỗi file, dữ liệu đi theo cấu trúc `parts[].groups[].questions[]`; câu không thuộc passage nằm trong `parts[].standaloneQuestions[]`.
 
-`validate` kiểm tra thêm độ hoàn chỉnh của đề 200 câu, passage không được tham chiếu, URL media chưa resolve, source payload bị thiếu, media chưa gắn entity và media chưa tải xong. Lệnh trả exit code khác 0 nếu bất kỳ nhóm kiểm tra nào còn lỗi.
+`validate` kiểm tra thêm độ hoàn chỉnh của đề 200 câu, passage không được tham chiếu, URL media chưa resolve, source payload/snapshot bị thiếu hoặc cũ, trạng thái test sai, media chưa gắn entity, media chưa tải xong và file media orphan. Lệnh trả exit code khác 0 nếu bất kỳ nhóm kiểm tra nào còn lỗi.
 
 ## Quy tắc an toàn
 

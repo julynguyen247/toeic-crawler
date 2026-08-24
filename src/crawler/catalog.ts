@@ -1,5 +1,5 @@
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { SessionProvider } from "../auth/session-provider.js";
 import type { AppConfig } from "../config.js";
@@ -84,9 +84,13 @@ export async function syncCatalog(
     handle.db.transaction((tx) => {
       tx.update(collections)
         .set({ missingFromSource: true })
-        .where(eq(collections.sourceSystem, "dautoeic"))
+        .where(
+          and(
+            eq(collections.sourceSystem, "dautoeic"),
+            ne(collections.sourceId, "accessible-question-bank"),
+          ),
+        )
         .run();
-      tx.update(tests).set({ missingFromSource: true }).run();
 
       const collectionIds = new Map<string, number>();
       for (const source of sourceCollections) {
@@ -121,6 +125,14 @@ export async function syncCatalog(
           .returning({ id: collections.id })
           .get();
         collectionIds.set(source.id, row.id);
+      }
+
+      const publicCollectionIds = [...collectionIds.values()];
+      if (publicCollectionIds.length) {
+        tx.update(tests)
+          .set({ missingFromSource: true })
+          .where(inArray(tests.collectionId, publicCollectionIds))
+          .run();
       }
 
       for (const source of sourceTests) {

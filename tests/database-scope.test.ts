@@ -2,7 +2,7 @@ import path from "node:path";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { describe, expect, it } from "vitest";
 import { openDatabase } from "../src/storage/database.js";
-import { collections, crawlRuns, tests } from "../src/storage/schema.js";
+import { collections, crawlRuns, media, tests } from "../src/storage/schema.js";
 import { temporaryConfig } from "./helpers.js";
 
 describe("database source identity", () => {
@@ -49,6 +49,29 @@ describe("database source identity", () => {
         .run();
 
       expect(handle.db.select().from(tests).all()).toHaveLength(2);
+    } finally {
+      handle.sqlite.close();
+    }
+  });
+});
+
+describe("database media identity", () => {
+  it("deduplicates external media by canonical URL even with null storage fields", () => {
+    const config = temporaryConfig();
+    const handle = openDatabase(config);
+    try {
+      migrate(handle.db, {
+        migrationsFolder: path.resolve(process.cwd(), "drizzle"),
+      });
+      const values = {
+        provider: "external",
+        bucket: null,
+        objectPath: null,
+        canonicalUrl: "https://cdn.example.com/audio.mp3",
+        mediaType: "audio",
+      };
+      handle.db.insert(media).values(values).run();
+      expect(() => handle.db.insert(media).values(values).run()).toThrow();
     } finally {
       handle.sqlite.close();
     }

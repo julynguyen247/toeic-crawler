@@ -222,6 +222,7 @@ export const media = sqliteTable(
       table.bucket,
       table.objectPath,
     ),
+    uniqueIndex("media_canonical_url_unique").on(table.canonicalUrl),
     index("media_sha256_idx").on(table.sha256),
     index("media_download_status_idx").on(table.downloadStatus),
   ],
