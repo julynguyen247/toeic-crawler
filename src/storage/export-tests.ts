@@ -35,6 +35,21 @@ function groupBy<T, K>(values: T[], keyOf: (value: T) => K): Map<K, T[]> {
   return output;
 }
 
+function withSourcePayload<T extends { sourcePayloadJson?: string | null }>(
+  row: T,
+): Omit<T, "sourcePayloadJson"> & { sourcePayload: unknown } {
+  const { sourcePayloadJson, ...value } = row;
+  let sourcePayload: unknown = null;
+  if (sourcePayloadJson) {
+    try {
+      sourcePayload = JSON.parse(sourcePayloadJson);
+    } catch {
+      sourcePayload = null;
+    }
+  }
+  return { ...value, sourcePayload };
+}
+
 export interface SplitTestExportResult {
   outputDirectory: string;
   manifestPath: string;
@@ -106,7 +121,7 @@ export function exportTestsToSeparateJson(
           (a, b) => a.questionNumber - b.questionNumber,
         );
         const questionPayload = (question: (typeof questionRows)[number]) => ({
-          ...question,
+          ...withSourcePayload(question),
           choices: (choicesByQuestion.get(question.id) ?? []).sort(
             (a, b) => a.position - b.position,
           ),
@@ -123,7 +138,7 @@ export function exportTestsToSeparateJson(
                 return questionPayload(question);
               });
             return {
-              ...group,
+              ...withSourcePayload(group),
               media: mediaFor("question_group", group.id),
               questions: groupQuestions,
             };
@@ -138,11 +153,11 @@ export function exportTestsToSeparateJson(
       });
       const fileName = `${String(testIndex + 1).padStart(3, "0")}-${slugify(test.title)}.json`;
       const payload = {
-        schemaVersion: 2,
+        schemaVersion: 3,
         exportedAt,
         sourceSystem: "dautoeic",
         collection: collectionById.get(test.collectionId) ?? null,
-        test,
+        test: withSourcePayload(test),
         summary: {
           parts: testParts.length,
           passages: testParts.reduce(
@@ -171,7 +186,7 @@ export function exportTestsToSeparateJson(
     writeJsonAtomic(
       manifestPath,
       {
-        schemaVersion: 2,
+        schemaVersion: 3,
         exportedAt,
         totalTests: files.length,
         files,

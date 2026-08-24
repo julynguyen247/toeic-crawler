@@ -111,7 +111,7 @@ export function mergeMediaCandidates(
   return [...merged.values()];
 }
 
-async function downloadOne(
+async function downloadOneAttempt(
   config: AppConfig,
   candidate: MediaCandidate,
 ): Promise<DownloadedMedia> {
@@ -131,7 +131,10 @@ async function downloadOne(
   );
 
   try {
-    const response = await fetch(candidate.sourceUrl, { redirect: "follow" });
+    const response = await fetch(candidate.sourceUrl, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(60_000),
+    });
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -193,6 +196,22 @@ async function downloadOne(
       references: candidate.references,
     };
   }
+}
+
+async function downloadOne(
+  config: AppConfig,
+  candidate: MediaCandidate,
+): Promise<DownloadedMedia> {
+  const retryDelays = [1_000, 3_000, 7_000] as const;
+  let result = await downloadOneAttempt(config, candidate);
+  for (const delay of retryDelays) {
+    if (result.downloadStatus === "complete") {
+      return result;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    result = await downloadOneAttempt(config, candidate);
+  }
+  return result;
 }
 
 export async function downloadMedia(

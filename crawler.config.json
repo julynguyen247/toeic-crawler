@@ -32,6 +32,7 @@
     "/auth/v1/token",
     "/rest/v1/rpc/list_public_mock_tests",
     "/rest/v1/rpc/list_public_mock_test_sets",
+    "/rest/v1/rpc/get_mock_test_media_batch",
     "/rest/v1/rpc/get_vocabulary_catalog",
     "/rest/v1/rpc/get_vocab_words_by_parts"
   ]

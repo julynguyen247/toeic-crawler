@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
@@ -27,6 +28,7 @@ import {
 import { syncCatalog } from "./catalog.js";
 import {
   downloadMedia,
+  mergeMediaCandidates,
   type DownloadedMedia,
   type MediaCandidate,
 } from "./media.js";
@@ -78,11 +80,23 @@ const sourceQuestionSchema = z
     explanation_en: z.string().nullable().optional(),
     dich_nghia: z.string().nullable().optional(),
     dich_nghia_dap_an: z.string().nullable().optional(),
+    tu_vung: z.string().nullable().optional(),
+    difficulty_level: z.number().nullable().optional(),
+    section: z.string().nullable().optional(),
+    source: z.string().nullable().optional(),
+    pilot_status: z.string().nullable().optional(),
   })
   .passthrough();
 
+const sourceMediaMetadataSchema = z.object({
+  id: z.string().uuid(),
+  media_folder: z.string().nullable().optional(),
+  media_version: z.union([z.string(), z.number()]).nullable().optional(),
+});
+
 type SourcePassage = z.infer<typeof sourcePassageSchema>;
 type SourceQuestion = z.infer<typeof sourceQuestionSchema>;
+type SourceMediaMetadata = z.infer<typeof sourceMediaMetadataSchema>;
 
 export interface CrawlTestResult {
   runId: string;
@@ -99,6 +113,43 @@ export interface CrawlTestResult {
 function restPath(table: string, parameters: Record<string, string>): string {
   const query = new URLSearchParams(parameters);
   return `/rest/v1/${table}?${query.toString()}`;
+}
+
+function encodeStoragePath(value: string): string {
+  return value
+    .split("/")
+    .map((segment) => {
+      try {
+        return encodeURIComponent(decodeURIComponent(segment));
+      } catch {
+        return encodeURIComponent(segment);
+      }
+    })
+    .join("/");
+}
+
+export function resolveTestMediaUrl(
+  config: Pick<AppConfig, "supabaseUrl">,
+  sourceUrl: string,
+  metadata: SourceMediaMetadata | null,
+): string {
+  if (/^https?:\/\//i.test(sourceUrl)) {
+    return sourceUrl;
+  }
+  const folder = metadata?.media_folder;
+  if (!folder || folder === "none") {
+    throw new Error(
+      `Cannot resolve relative media path ${JSON.stringify(sourceUrl)} without a media_folder.`,
+    );
+  }
+  const url = new URL(
+    `/storage/v1/object/public/mock-test-media/${encodeStoragePath(folder)}/${encodeStoragePath(sourceUrl)}`,
+    config.supabaseUrl,
+  );
+  if (metadata.media_version !== null && metadata.media_version !== undefined) {
+    url.searchParams.set("v", String(metadata.media_version));
+  }
+  return url.toString();
 }
 
 function validateSourceTest(
@@ -150,14 +201,20 @@ function validateSourceTest(
 }
 
 function collectMedia(
+  config: AppConfig,
   sourceQuestions: SourceQuestion[],
   passages: SourcePassage[],
+  mediaMetadata: SourceMediaMetadata | null,
 ): MediaCandidate[] {
   const candidates: MediaCandidate[] = [];
   for (const question of sourceQuestions) {
     if (question.audio_url) {
       candidates.push({
-        sourceUrl: question.audio_url,
+        sourceUrl: resolveTestMediaUrl(
+          config,
+          question.audio_url,
+          mediaMetadata,
+        ),
         references: [
           {
             entityType: "question",
@@ -169,7 +226,11 @@ function collectMedia(
     }
     if (question.image_url) {
       candidates.push({
-        sourceUrl: question.image_url,
+        sourceUrl: resolveTestMediaUrl(
+          config,
+          question.image_url,
+          mediaMetadata,
+        ),
         references: [
           {
             entityType: "question",
@@ -183,7 +244,11 @@ function collectMedia(
   for (const passage of passages) {
     if (passage.audio_url) {
       candidates.push({
-        sourceUrl: passage.audio_url,
+        sourceUrl: resolveTestMediaUrl(
+          config,
+          passage.audio_url,
+          mediaMetadata,
+        ),
         references: [
           {
             entityType: "question_group",
@@ -195,7 +260,11 @@ function collectMedia(
     }
     if (passage.image_url) {
       candidates.push({
-        sourceUrl: passage.image_url,
+        sourceUrl: resolveTestMediaUrl(
+          config,
+          passage.image_url,
+          mediaMetadata,
+        ),
         references: [
           {
             entityType: "question_group",
@@ -209,13 +278,77 @@ function collectMedia(
   return candidates;
 }
 
+function reuseCompletedMedia(
+  config: AppConfig,
+  handle: ReturnType<typeof startRun>["handle"],
+  candidates: MediaCandidate[],
+): { reused: DownloadedMedia[]; pending: MediaCandidate[] } {
+  const queue = mergeMediaCandidates(config, candidates);
+  if (!queue.length) {
+    return { reused: [], pending: [] };
+  }
+  const candidateUrls = queue.map((candidate) =>
+    canonicalizeUrl(candidate.sourceUrl),
+  );
+  const completedByUrl = new Map(
+    handle.db
+      .select()
+      .from(media)
+      .where(
+        and(
+          eq(media.downloadStatus, "complete"),
+          inArray(media.canonicalUrl, candidateUrls),
+        ),
+      )
+      .all()
+      .filter(
+        (item) =>
+          item.canonicalUrl &&
+          item.localPath &&
+          fs.existsSync(path.resolve(config.cwd, item.localPath)),
+      )
+      .map((item) => [item.canonicalUrl!, item]),
+  );
+  const reused: DownloadedMedia[] = [];
+  const pending: MediaCandidate[] = [];
+  for (const candidate of queue) {
+    const canonicalUrl = canonicalizeUrl(candidate.sourceUrl);
+    const existing = completedByUrl.get(canonicalUrl);
+    if (!existing) {
+      pending.push(candidate);
+      continue;
+    }
+    reused.push({
+      sourceUrl: candidate.sourceUrl,
+      provider:
+        existing.provider === "supabase-storage"
+          ? "supabase-storage"
+          : "external",
+      bucket: existing.bucket,
+      objectPath: existing.objectPath,
+      canonicalUrl,
+      localPath: existing.localPath,
+      mediaType: existing.mediaType === "audio" ? "audio" : "image",
+      mimeType: existing.mimeType,
+      sha256: existing.sha256,
+      byteSize: existing.byteSize,
+      downloadStatus: "complete",
+      error: null,
+      references: candidate.references,
+    });
+  }
+  return { reused, pending };
+}
+
 function replaceNormalizedTest(
+  config: AppConfig,
   handle: ReturnType<typeof startRun>["handle"],
   runId: string,
   internalTestId: number,
   sourceTest: z.infer<typeof sourceTestSchema>,
   sourceQuestions: SourceQuestion[],
   sourcePassages: SourcePassage[],
+  mediaMetadata: SourceMediaMetadata | null,
   downloadedMedia: DownloadedMedia[],
 ): void {
   handle.db.transaction((tx) => {
@@ -311,11 +444,16 @@ function replaceNormalizedTest(
           contentText: contentText || null,
           transcript: passage.transcript ?? null,
           audioUrl: passage.audio_url
-            ? canonicalizeUrl(passage.audio_url)
+            ? canonicalizeUrl(
+                resolveTestMediaUrl(config, passage.audio_url, mediaMetadata),
+              )
             : null,
           imageUrl: passage.image_url
-            ? canonicalizeUrl(passage.image_url)
+            ? canonicalizeUrl(
+                resolveTestMediaUrl(config, passage.image_url, mediaMetadata),
+              )
             : null,
+          sourcePayloadJson: JSON.stringify(passage),
           position: passage.order_index ?? 0,
           contentHash: contentHash(passage),
         })
@@ -354,12 +492,26 @@ function replaceNormalizedTest(
           promptText: question.question_text ?? null,
           correctChoiceKey: question.correct_answer,
           explanationText: explanation || null,
+          explanationVi: question.explanation_vi ?? null,
+          explanationEn: question.explanation_en ?? null,
+          translation: question.dich_nghia ?? null,
+          answerTranslation: question.dich_nghia_dap_an ?? null,
+          vocabulary: question.tu_vung ?? null,
           evidence: question.dich_nghia ?? null,
+          difficultyLevel: question.difficulty_level ?? null,
+          section: question.section ?? null,
+          source: question.source ?? null,
+          pilotStatus: question.pilot_status ?? null,
+          sourcePayloadJson: JSON.stringify(question),
           audioUrl: question.audio_url
-            ? canonicalizeUrl(question.audio_url)
+            ? canonicalizeUrl(
+                resolveTestMediaUrl(config, question.audio_url, mediaMetadata),
+              )
             : null,
           imageUrl: question.image_url
-            ? canonicalizeUrl(question.image_url)
+            ? canonicalizeUrl(
+                resolveTestMediaUrl(config, question.image_url, mediaMetadata),
+              )
             : null,
           position: question.order_index ?? question.question_number,
           contentHash: contentHash(question),
@@ -451,6 +603,17 @@ function replaceNormalizedTest(
 
     tx.update(tests)
       .set({
+        title: sourceTest.name,
+        questionCount: sourceQuestions.length,
+        sourceUpdatedAt: sourceTest.updated_at ?? null,
+        mediaFolder: mediaMetadata?.media_folder ?? null,
+        mediaVersion:
+          mediaMetadata?.media_version === null ||
+          mediaMetadata?.media_version === undefined
+            ? null
+            : String(mediaMetadata.media_version),
+        sourcePayloadJson: JSON.stringify(sourceTest),
+        missingFromSource: false,
         crawlStatus: downloadedMedia.some(
           (item) => item.downloadStatus === "failed",
         )
@@ -499,8 +662,8 @@ export async function crawlTest(
   const { runId, handle } = startRun(config, `test:${sourceTestId}`, true);
 
   try {
-    const [testResponse, questionResponse, passageResponse] = await Promise.all(
-      [
+    const [testResponse, questionResponse, passageResponse, mediaResponse] =
+      await Promise.all([
         api.get<unknown[]>(
           restPath("mock_tests", { select: "*", id: `eq.${sourceTestId}` }),
         ),
@@ -518,8 +681,10 @@ export async function crawlTest(
             order: "order_index.asc",
           }),
         ),
-      ],
-    );
+        api.rpc<unknown[]>("get_mock_test_media_batch", {
+          p_test_ids: [sourceTestId],
+        }),
+      ]);
     const sourceTest = sourceTestSchema.parse(
       testResponse.data[0] ?? {
         id: sourceTestId,
@@ -535,10 +700,25 @@ export async function crawlTest(
     const sourcePassages = z
       .array(sourcePassageSchema)
       .parse(passageResponse.data);
+    const mediaMetadata =
+      z
+        .array(sourceMediaMetadataSchema)
+        .parse(mediaResponse.data)
+        .find((item) => item.id === sourceTestId) ?? null;
     validateSourceTest(sourceTest, sourceQuestions, sourcePassages);
+
+    const referencedPassageIds = new Set(
+      sourceQuestions
+        .map((question) => question.passage_id)
+        .filter((value): value is string => Boolean(value)),
+    );
+    const referencedPassages = sourcePassages.filter((passage) =>
+      referencedPassageIds.has(passage.id),
+    );
 
     const snapshot = saveRawSnapshot(config, runId, "test", sourceTestId, {
       test: sourceTest,
+      media: mediaMetadata,
       questions: sourceQuestions,
       passages: sourcePassages,
     });
@@ -550,11 +730,21 @@ export async function crawlTest(
       payloadSha256: snapshot.sha256,
     });
 
-    const mediaCandidates = collectMedia(sourceQuestions, sourcePassages);
-    const downloadedMedia =
-      options.downloadMedia === false
-        ? []
-        : await downloadMedia(config, mediaCandidates);
+    const mediaCandidates = collectMedia(
+      config,
+      sourceQuestions,
+      referencedPassages,
+      mediaMetadata,
+    );
+    let downloadedMedia: DownloadedMedia[] = [];
+    if (options.downloadMedia !== false) {
+      const { reused, pending } = reuseCompletedMedia(
+        config,
+        handle,
+        mediaCandidates,
+      );
+      downloadedMedia = [...reused, ...(await downloadMedia(config, pending))];
+    }
     let storedTest = handle.db
       .select({ id: tests.id })
       .from(tests)
@@ -596,18 +786,27 @@ export async function crawlTest(
           firstSeenRunId: runId,
           lastSeenRunId: runId,
           contentHash: contentHash(sourceTest),
+          mediaFolder: mediaMetadata?.media_folder ?? null,
+          mediaVersion:
+            mediaMetadata?.media_version === null ||
+            mediaMetadata?.media_version === undefined
+              ? null
+              : String(mediaMetadata.media_version),
+          sourcePayloadJson: JSON.stringify(sourceTest),
           missingFromSource: false,
         })
         .returning({ id: tests.id })
         .get();
     }
     replaceNormalizedTest(
+      config,
       handle,
       runId,
       storedTest.id,
       sourceTest,
       sourceQuestions,
-      sourcePassages,
+      referencedPassages,
+      mediaMetadata,
       downloadedMedia,
     );
 
@@ -632,7 +831,10 @@ export async function crawlTest(
         testId: sourceTestId,
         title: sourceTest.name,
         questions: sourceQuestions.length,
-        passages: sourcePassages.length,
+        passages: referencedPassages.length,
+        sourcePassages: sourcePassages.length,
+        ignoredUnreferencedPassages:
+          sourcePassages.length - referencedPassages.length,
         mediaComplete,
         mediaFailed: mediaErrors.length,
         mediaSkipped,
@@ -652,7 +854,7 @@ export async function crawlTest(
       testId: sourceTestId,
       title: sourceTest.name,
       questions: sourceQuestions.length,
-      passages: sourcePassages.length,
+      passages: referencedPassages.length,
       mediaComplete,
       mediaFailed: mediaErrors.length,
       mediaSkipped,

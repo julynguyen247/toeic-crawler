@@ -63,7 +63,7 @@ npm run crawl -- discover-test-bank
 npm run crawl -- test-bank --resume
 ```
 
-`test-bank` mặc định ưu tiên lấy đủ nhiều đề: lưu câu hỏi, đáp án, giải thích, passage, transcript và URL audio/hình nhưng không tải binary. Thêm `--with-media` nếu có đủ dung lượng để tải media của toàn bộ kho.
+`test-bank` mặc định ưu tiên lấy đủ nhiều đề: lưu câu hỏi, đáp án, giải thích, passage, transcript và URL audio/hình nhưng không tải binary. Thêm `--with-media` để tải media của toàn bộ kho. Crawler dùng RPC read-only `get_mock_test_media_batch` giống frontend để resolve các đường dẫn tương đối, tái sử dụng file đã tải và retry lỗi mạng tối đa ba lần.
 
 Nếu không muốn chọn toàn bộ catalog, điền ID hoặc tên chính xác vào mảng `tests` trong `crawler.config.json`, rồi chạy:
 
@@ -109,7 +109,9 @@ npm run export -- --format json --output data/exports/toeic.json
 npm run export-tests -- --output-dir data/exports/tests
 ```
 
-`export-tests` tạo một file JSON lồng sẵn cho mỗi đề và `manifest.json` để tra danh sách. Trong mỗi file, dữ liệu đi theo cấu trúc `parts[].groups[].questions[]`; câu không thuộc passage nằm trong `parts[].standaloneQuestions[]`.
+`export-tests` tạo một file JSON lồng sẵn cho mỗi đề và `manifest.json` để tra danh sách. Schema export v3 giữ cả các cột normalized lẫn object `sourcePayload` nguyên bản cho test, passage và question. Trong mỗi file, dữ liệu đi theo cấu trúc `parts[].groups[].questions[]`; câu không thuộc passage nằm trong `parts[].standaloneQuestions[]`.
+
+`validate` kiểm tra thêm độ hoàn chỉnh của đề 200 câu, passage không được tham chiếu, URL media chưa resolve, source payload bị thiếu, media chưa gắn entity và media chưa tải xong. Lệnh trả exit code khác 0 nếu bất kỳ nhóm kiểm tra nào còn lỗi.
 
 ## Quy tắc an toàn
 

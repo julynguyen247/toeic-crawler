@@ -6,7 +6,7 @@ dist/
 output/playwright/
 data/*.sqlite*
 data/exports/
-data/media/
+data/media
 data/raw/
 data/reports/
 *.log

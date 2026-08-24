@@ -331,7 +331,8 @@ program
       result.integrity !== "ok" ||
       result.foreignKeyViolations.length ||
       result.missingMediaFiles.length ||
-      result.checksumMismatches.length
+      result.checksumMismatches.length ||
+      Object.values(result.completeness).some((issue) => issue.count > 0)
     ) {
       process.exitCode = 1;
     }

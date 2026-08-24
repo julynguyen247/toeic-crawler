@@ -17,6 +17,21 @@ import {
   tests,
 } from "./schema.js";
 
+function withSourcePayload<T extends { sourcePayloadJson?: string | null }>(
+  row: T,
+): Omit<T, "sourcePayloadJson"> & { sourcePayload: unknown } {
+  const { sourcePayloadJson, ...value } = row;
+  let sourcePayload: unknown = null;
+  if (sourcePayloadJson) {
+    try {
+      sourcePayload = JSON.parse(sourcePayloadJson);
+    } catch {
+      sourcePayload = null;
+    }
+  }
+  return { ...value, sourcePayload };
+}
+
 export function exportDatabaseToJson(
   config: AppConfig,
   outputPath?: string,
@@ -33,14 +48,18 @@ export function exportDatabaseToJson(
   const { db, sqlite } = openDatabase(config);
   try {
     const payload = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       exportedAt: new Date().toISOString(),
       sourceSystem: "dautoeic",
       collections: db.select().from(collections).all(),
-      tests: db.select().from(tests).all(),
+      tests: db.select().from(tests).all().map(withSourcePayload),
       parts: db.select().from(parts).all(),
-      questionGroups: db.select().from(questionGroups).all(),
-      questions: db.select().from(questions).all(),
+      questionGroups: db
+        .select()
+        .from(questionGroups)
+        .all()
+        .map(withSourcePayload),
+      questions: db.select().from(questions).all().map(withSourcePayload),
       choices: db.select().from(choices).all(),
       contentRecords: db.select().from(contentRecords).all(),
       contentRecordMedia: db.select().from(contentRecordMedia).all(),
