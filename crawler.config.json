@@ -1,0 +1,38 @@
+{
+  "collections": [],
+  "tests": [],
+  "allowSourceMutations": false,
+  "allowedRequests": [
+    {
+      "method": "GET",
+      "pathPrefix": "/rest/v1/"
+    },
+    {
+      "method": "HEAD",
+      "pathPrefix": "/rest/v1/"
+    },
+    {
+      "method": "POST",
+      "pathPrefix": "/rest/v1/rpc/"
+    },
+    {
+      "method": "GET",
+      "pathPrefix": "/storage/v1/"
+    },
+    {
+      "method": "GET",
+      "pathPrefix": "/auth/v1/"
+    },
+    {
+      "method": "POST",
+      "pathPrefix": "/auth/v1/token"
+    }
+  ],
+  "readOnlyPostEndpoints": [
+    "/auth/v1/token",
+    "/rest/v1/rpc/list_public_mock_tests",
+    "/rest/v1/rpc/list_public_mock_test_sets",
+    "/rest/v1/rpc/get_vocabulary_catalog",
+    "/rest/v1/rpc/get_vocab_words_by_parts"
+  ]
+}

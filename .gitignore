@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.auth/
+.playwright-cli/
+output/playwright/
+data/*.sqlite*
+data/exports/
+data/media/
+data/raw/
+data/reports/
+*.log
+coverage/

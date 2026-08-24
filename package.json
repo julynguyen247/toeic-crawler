@@ -1,0 +1,48 @@
+{
+  "name": "dautoeic-crawler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authorized TOEIC content crawler for dautoeic.com",
+  "scripts": {
+    "auth": "tsx src/cli.ts auth",
+    "auth:clear": "tsx src/cli.ts auth-clear",
+    "crawl": "tsx src/cli.ts crawl",
+    "validate": "tsx src/cli.ts validate",
+    "export": "tsx src/cli.ts export",
+    "export-tests": "tsx src/cli.ts export-tests",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx src/storage/migrate.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "better-sqlite3": "^13.0.3",
+    "commander": "^15.0.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.45.2",
+    "pino": "^10.3.1",
+    "playwright": "^1.62.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "drizzle-kit": "^0.31.10",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.6.2",
+    "tsx": "^4.23.12",
+    "typescript": "^6.0.0",
+    "vitest": "^4.1.11"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "better-sqlite3": true
+  }
+}
