@@ -12,6 +12,9 @@ import {
 } from "../storage/run-repository.js";
 
 const PAGE_SIZE = 1000;
+const MAX_PAGINATION_ATTEMPTS = 3;
+
+class SourceChangedDuringPaginationError extends Error {}
 
 const questionIndexSchema = z
   .object({
@@ -36,23 +39,97 @@ export interface TestBankCandidate {
   isComplete200: boolean;
 }
 
-async function fetchQuestionIndex(
-  api: SupabaseAdapter,
+function totalFromContentRange(value: string | null): number | null {
+  const total = value?.match(/\/(\d+)$/)?.[1];
+  return total === undefined ? null : Number(total);
+}
+
+async function fetchExactQuestionCount(
+  api: Pick<SupabaseAdapter, "get">,
+): Promise<number> {
+  const query = new URLSearchParams({ select: "id", limit: "1" });
+  const response = await api.get<unknown[]>(
+    `/rest/v1/mock_test_questions?${query.toString()}`,
+    { headers: { Prefer: "count=exact" } },
+  );
+  const total = totalFromContentRange(response.contentRange);
+  if (total === null) {
+    throw new Error(
+      "Question-bank discovery did not receive an exact source row count.",
+    );
+  }
+  return total;
+}
+
+async function fetchQuestionIndexOnce(
+  api: Pick<SupabaseAdapter, "get">,
 ): Promise<Array<z.infer<typeof questionIndexSchema>>> {
   const output: Array<z.infer<typeof questionIndexSchema>> = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
+  let startingTotal: number | null = null;
+  let cursor: string | null = null;
+
+  for (;;) {
     const query = new URLSearchParams({
       select: "id,test_id,question_number,part,source,pilot_status",
-      order: "test_id.asc,question_number.asc",
-      offset: String(offset),
+      order: "id.asc",
       limit: String(PAGE_SIZE),
     });
+    if (cursor) {
+      query.set("id", `gt.${cursor}`);
+    }
     const response = await api.get<unknown[]>(
       `/rest/v1/mock_test_questions?${query.toString()}`,
+      { headers: { Prefer: "count=exact" } },
     );
-    output.push(...z.array(questionIndexSchema).parse(response.data));
+    if (startingTotal === null) {
+      startingTotal = totalFromContentRange(response.contentRange);
+      if (startingTotal === null) {
+        throw new Error(
+          "Question-bank discovery did not receive an exact source row count.",
+        );
+      }
+    }
+
+    const page = z.array(questionIndexSchema).parse(response.data);
+    if (
+      page.some((row, index) => {
+        const previousId = index === 0 ? cursor : page[index - 1]!.id;
+        return previousId !== null && row.id.localeCompare(previousId) <= 0;
+      })
+    ) {
+      throw new Error(
+        "Question-bank discovery received duplicate or unordered source IDs.",
+      );
+    }
+    output.push(...page);
+    cursor = page.at(-1)?.id ?? cursor;
     if (response.data.length < PAGE_SIZE) {
-      return output;
+      break;
+    }
+  }
+
+  const endingTotal = await fetchExactQuestionCount(api);
+  if (output.length !== endingTotal) {
+    throw new SourceChangedDuringPaginationError(
+      `Question-bank discovery started at ${startingTotal} rows, ended at ${endingTotal}, and received ${output.length}.`,
+    );
+  }
+  return output;
+}
+
+export async function fetchQuestionIndex(
+  api: Pick<SupabaseAdapter, "get">,
+): Promise<Array<z.infer<typeof questionIndexSchema>>> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fetchQuestionIndexOnce(api);
+    } catch (error) {
+      if (
+        !(error instanceof SourceChangedDuringPaginationError) ||
+        attempt >= MAX_PAGINATION_ATTEMPTS
+      ) {
+        throw error;
+      }
     }
   }
 }
