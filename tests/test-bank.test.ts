@@ -1,6 +1,12 @@
+import path from "node:path";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { describe, expect, it } from "vitest";
 import type { SupabaseAdapter } from "../src/crawler/supabase-adapter.js";
+import { synchronizeSyntheticTestTitles } from "../src/crawler/test.js";
 import { fetchQuestionIndex } from "../src/discovery/test-bank.js";
+import { contentHash } from "../src/shared/checksum.js";
+import { openDatabase } from "../src/storage/database.js";
+import { temporaryConfig } from "./helpers.js";
 
 function question(index: number) {
   return {
@@ -42,6 +48,59 @@ describe("test-bank pagination", () => {
     expect(paths[0]).toContain("order=id.asc");
     expect(paths[0]).not.toContain("offset=");
     expect(paths[1]).toContain(`id=gt.${encodeURIComponent(rows[999]!.id)}`);
+  });
+
+  it("resynchronizes synthetic titles without renaming catalog tests", () => {
+    const config = temporaryConfig();
+    const handle = openDatabase(config);
+    migrate(handle.db, {
+      migrationsFolder: path.resolve(process.cwd(), "drizzle"),
+    });
+    handle.sqlite.exec(`
+      INSERT INTO collections (id, source_id, title)
+      VALUES (1, 'accessible-question-bank', 'Question bank'),
+             (2, 'catalog', 'Catalog');
+      INSERT INTO tests (
+        collection_id, source_id, title, source_payload_json
+      ) VALUES
+        (1, 'synthetic-id', 'ETS Full Test 01', '{"name":"ETS Full Test 01"}'),
+        (2, 'catalog-id', 'Official Test', '{"name":"Official Test"}');
+    `);
+    handle.sqlite.close();
+
+    expect(
+      synchronizeSyntheticTestTitles(config, [
+        { testId: "catalog-id" },
+        { testId: "synthetic-id" },
+      ]),
+    ).toBe(1);
+
+    const checked = openDatabase(config);
+    const rows = checked.sqlite
+      .prepare(
+        `SELECT title,
+                json_extract(source_payload_json, '$.name') payloadName,
+                content_hash contentHash
+         FROM tests ORDER BY id`,
+      )
+      .all();
+    checked.sqlite.close();
+    expect(rows).toEqual([
+      {
+        title: "ETS Full Test 02",
+        payloadName: "ETS Full Test 02",
+        contentHash: contentHash({
+          sourceTest: { name: "ETS Full Test 02" },
+          sourceQuestions: [],
+          sourcePassages: [],
+        }),
+      },
+      {
+        title: "Official Test",
+        payloadName: "Official Test",
+        contentHash: null,
+      },
+    ]);
   });
 
   it("fails instead of silently accepting an incomplete result", async () => {

@@ -120,6 +120,12 @@ export const questionGroups = sqliteTable(
     translation: text("translation"),
     audioUrl: text("audio_url"),
     imageUrl: text("image_url"),
+    imageAltText: text("image_alt_text"),
+    imageAltSource: text("image_alt_source"),
+    imageAltNeedsReview: integer("image_alt_needs_review", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    imageAltVersion: text("image_alt_version"),
     sourcePayloadJson: text("source_payload_json"),
     position: integer("position").notNull(),
     contentHash: text("content_hash").notNull(),
@@ -154,6 +160,7 @@ export const questions = sqliteTable(
     explanationText: text("explanation_text"),
     explanationVi: text("explanation_vi"),
     explanationEn: text("explanation_en"),
+    explanationSource: text("explanation_source"),
     translation: text("translation"),
     answerTranslation: text("answer_translation"),
     vocabulary: text("vocabulary"),
@@ -165,6 +172,15 @@ export const questions = sqliteTable(
     sourcePayloadJson: text("source_payload_json"),
     audioUrl: text("audio_url"),
     imageUrl: text("image_url"),
+    imageAltText: text("image_alt_text"),
+    imageAltSource: text("image_alt_source"),
+    imageAltNeedsReview: integer("image_alt_needs_review", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    imageAltVersion: text("image_alt_version"),
+    skillTagsJson: text("skill_tags_json").notNull().default("[]"),
+    skillTagVersion: text("skill_tag_version"),
+    enrichmentVersion: text("enrichment_version"),
     position: integer("position").notNull(),
     contentHash: text("content_hash").notNull(),
   },

@@ -13,6 +13,13 @@ describe("database validation", () => {
     migrate(handle.db, {
       migrationsFolder: path.resolve(process.cwd(), "drizzle"),
     });
+    handle.sqlite
+      .prepare(
+        `INSERT INTO media (
+           provider, canonical_url, media_type, download_status
+         ) VALUES (?, ?, ?, ?)`,
+      )
+      .run("https", "https://cdn.example/orphan.mp3", "audio", "pending");
     handle.sqlite.close();
 
     fs.mkdirSync(config.mediaDir, { recursive: true });
@@ -21,5 +28,9 @@ describe("database validation", () => {
     expect(validateDatabase(config).untrackedMediaFiles).toEqual([
       "data/media/orphan.partial",
     ]);
+    expect(validateDatabase(config).completeness.orphanMediaRows).toEqual({
+      count: 1,
+      samples: ["https://cdn.example/orphan.mp3"],
+    });
   });
 });

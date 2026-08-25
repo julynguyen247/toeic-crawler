@@ -3,6 +3,7 @@ dist/
 .env
 .auth/
 .playwright-cli/
+.cache/
 output/playwright/
 data/*.sqlite*
 data/exports/

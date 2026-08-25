@@ -32,6 +32,25 @@ function withSourcePayload<T extends { sourcePayloadJson?: string | null }>(
   return { ...value, sourcePayload };
 }
 
+function withQuestionEnrichment<
+  T extends { sourcePayloadJson?: string | null; skillTagsJson: string },
+>(row: T) {
+  const { skillTagsJson, ...value } = withSourcePayload(row);
+  let skillTags: string[] = [];
+  try {
+    const parsed = JSON.parse(skillTagsJson) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((tag) => typeof tag === "string")
+    ) {
+      skillTags = parsed;
+    }
+  } catch {
+    skillTags = [];
+  }
+  return { ...value, skillTags };
+}
+
 export function exportDatabaseToJson(
   config: AppConfig,
   outputPath?: string,
@@ -48,7 +67,7 @@ export function exportDatabaseToJson(
   const { db, sqlite } = openDatabase(config);
   try {
     const payload = {
-      schemaVersion: 3,
+      schemaVersion: 5,
       exportedAt: new Date().toISOString(),
       sourceSystem: "dautoeic",
       collections: db.select().from(collections).all(),
@@ -59,7 +78,7 @@ export function exportDatabaseToJson(
         .from(questionGroups)
         .all()
         .map(withSourcePayload),
-      questions: db.select().from(questions).all().map(withSourcePayload),
+      questions: db.select().from(questions).all().map(withQuestionEnrichment),
       choices: db.select().from(choices).all(),
       contentRecords: db.select().from(contentRecords).all(),
       contentRecordMedia: db.select().from(contentRecordMedia).all(),

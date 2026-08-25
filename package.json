@@ -9,6 +9,7 @@
     "auth:clear": "tsx src/cli.ts auth-clear",
     "crawl": "tsx src/cli.ts crawl",
     "validate": "tsx src/cli.ts validate",
+    "enrich": "tsx src/cli.ts enrich",
     "export": "tsx src/cli.ts export",
     "export-tests": "tsx src/cli.ts export-tests",
     "db:generate": "drizzle-kit generate",
@@ -29,6 +30,7 @@
     "drizzle-orm": "^0.45.2",
     "pino": "^10.3.1",
     "playwright": "^1.62.1",
+    "tesseract.js": "^6.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

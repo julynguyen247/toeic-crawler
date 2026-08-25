@@ -65,6 +65,8 @@ npm run crawl -- test-bank --resume
 
 `test-bank` mặc định ưu tiên lấy đủ nhiều đề: lưu câu hỏi, đáp án, giải thích, passage, transcript và URL audio/hình nhưng không tải binary. Thêm `--with-media` để tải media của toàn bộ kho. Crawler dùng RPC read-only `get_mock_test_media_batch` giống frontend để resolve các đường dẫn tương đối, tái sử dụng file đã tải và retry lỗi mạng tối đa ba lần.
 
+Mỗi lần chạy, `test-bank` discovery lại nguồn và đồng bộ tên synthetic theo danh sách đầy đủ hiện tại, kể cả khi dùng `--resume`. Vì nguồn có thể thêm đề làm thứ tự hiển thị thay đổi, luôn dùng `sourceId` UUID làm định danh ổn định.
+
 Nếu không muốn chọn toàn bộ catalog, điền ID hoặc tên chính xác vào mảng `tests` trong `crawler.config.json`, rồi chạy:
 
 ```bash
@@ -104,14 +106,19 @@ POST/RPC không có trong `readOnlyPostEndpoints` sẽ bị chặn. Crawler chí
 ```bash
 npm run typecheck
 npm test
+npm run enrich
 npm run validate
 npm run export -- --format json --output data/exports/toeic.json
 npm run export-tests -- --output-dir data/exports/tests
 ```
 
-`export-tests` tạo một file JSON lồng sẵn cho mỗi đề và `manifest.json` để tra danh sách. Schema export v3 giữ cả các cột normalized lẫn object `sourcePayload` nguyên bản cho test, passage và question. Trong mỗi file, dữ liệu đi theo cấu trúc `parts[].groups[].questions[]`; câu không thuộc passage nằm trong `parts[].standaloneQuestions[]`.
+`enrich` bổ sung dữ liệu còn thiếu cho toàn bộ câu đã crawl và có thể chạy lại an toàn: giữ nguyên lời giải thật từ nguồn, phát hiện trường hợp nguồn đặt nhầm bản dịch câu hỏi/A–D vào `explanation_en`, sinh lời giải có lý do cho Part 1–2, Part 3–4/7 bị nhầm dữ liệu và những câu Part 5–6 chỉ có bản dịch đáp án, tạo alt text cho ảnh Part 1, chạy OCR trên bảng/biểu đồ Part 3–7 và gắn `skillTags`. Khi có thể, lời giải Part 3–4/7 dẫn lại câu liên quan từ transcript/bài đọc; raw nguồn vẫn được giữ nguyên trong `sourcePayload`. Alt text Part 1 dùng mô tả cảnh chuyên biệt khi nguồn có, nếu không dùng correct caption đã được nguồn xác nhận và ghi provenance `source_correct_caption`. Crawler cũng chạy cùng pipeline khi lấy đề mới, nên không cần sửa tay từng đề. Nhãn kỹ năng được suy ra có phiên bản từ câu hỏi, đáp án, lời giải và metadata nguồn; các trường version giúp nhận biết khi nào cần chạy lại.
 
-`validate` kiểm tra thêm độ hoàn chỉnh của đề 200 câu, passage không được tham chiếu, URL media chưa resolve, source payload/snapshot bị thiếu hoặc cũ, trạng thái test sai, media chưa gắn entity, media chưa tải xong và file media orphan. Lệnh trả exit code khác 0 nếu bất kỳ nhóm kiểm tra nào còn lỗi.
+`export-tests` tạo một file JSON lồng sẵn cho mỗi đề và `manifest.json` để tra danh sách. Schema export v5 giữ cả các cột normalized lẫn object `sourcePayload` nguyên bản cho test, passage và question. Mỗi question có `answerTranslation` tách riêng, `explanationSource` (`source` hoặc `derived`), `imageAltText`, metadata nguồn/review/version của alt text, mảng `skillTags`, `skillTagVersion` và `enrichmentVersion`. Group có ảnh cũng chứa alt text và metadata tương ứng. Trong mỗi file, dữ liệu đi theo cấu trúc `parts[].groups[].questions[]`; câu không thuộc passage nằm trong `parts[].standaloneQuestions[]`.
+
+Trong manifest, `index` là thứ tự file hiện tại, `databaseId` chỉ là khóa nội bộ của SQLite và `sourceId` là UUID ổn định cần dùng để upsert/import. Không dùng `databaseId`, `questions[].id`, `partId` hoặc `testId` làm ID lâu dài ở database đích; các số này chỉ giữ quan hệ bên trong snapshot nguồn.
+
+`validate` kiểm tra thêm độ hoàn chỉnh của đề 200 câu, lời giải có tính sư phạm (không lấy bản dịch đáp án làm lời giải), alt text của mọi ảnh ở question/group, skill tags/version, passage không được tham chiếu, URL media chưa resolve, source payload/snapshot bị thiếu hoặc cũ, trạng thái test sai, media chưa gắn entity, media chưa tải xong và file media orphan. Lệnh trả exit code khác 0 nếu bất kỳ nhóm kiểm tra nào còn lỗi.
 
 ## Quy tắc an toàn
 

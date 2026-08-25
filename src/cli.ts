@@ -12,12 +12,18 @@ import { syncCatalog } from "./crawler/catalog.js";
 import { crawlContent } from "./crawler/content.js";
 import { crawlContentMedia } from "./crawler/content-media.js";
 import { retryFailedMedia } from "./crawler/retry-media.js";
-import { completedTestSourceIds, crawlTest } from "./crawler/test.js";
+import {
+  completedTestSourceIds,
+  crawlTest,
+  synchronizeSyntheticTestTitles,
+} from "./crawler/test.js";
 import { createLogger } from "./shared/logger.js";
 import { runMigrations } from "./storage/migrate.js";
 import { validateDatabase } from "./storage/validate.js";
 import { exportDatabaseToJson } from "./storage/export-json.js";
 import { exportTestsToSeparateJson } from "./storage/export-tests.js";
+import { enrichStoredQuestions } from "./storage/enrich-questions.js";
+import { enrichStoredQuestionGroups } from "./storage/enrich-question-groups.js";
 
 const program = new Command();
 program
@@ -247,6 +253,10 @@ crawl
     runMigrations();
     const config = getConfig();
     const discovery = await discoverTestBank(config);
+    const renamedTests = synchronizeSyntheticTestTitles(
+      config,
+      discovery.completeCandidates,
+    );
     const completed = options.resume
       ? completedTestSourceIds(config)
       : new Set<string>();
@@ -256,7 +266,7 @@ crawl
     let succeeded = 0;
     const failures: Array<{ testId: string; error: string }> = [];
     process.stdout.write(
-      `Test bank selected ${discovery.completeCandidates.length} complete test(s); ${discovery.completeCandidates.length - queue.length} skipped; ${queue.length} queued.\n`,
+      `Test bank selected ${discovery.completeCandidates.length} complete test(s); ${discovery.completeCandidates.length - queue.length} skipped; ${queue.length} queued; ${renamedTests} synthetic title(s) synchronized.\n`,
     );
     for (const candidate of queue) {
       const catalogIndex =
@@ -317,6 +327,30 @@ crawl
     const result = await inspectTest(getConfig(), options);
     process.stdout.write(
       `Inspect captured ${result.capturedResponses} Supabase response(s), blocked ${result.blockedRequests} request(s), at ${result.pageUrl}.\nReport: ${result.reportPath}\n`,
+    );
+  });
+
+program
+  .command("enrich")
+  .description(
+    "Backfill explanations, image alt text/OCR, and TOEIC skill tags",
+  )
+  .action(async () => {
+    runMigrations();
+    const config = getConfig();
+    let lastReported = 0;
+    const graphicGroups = await enrichStoredQuestionGroups(
+      config,
+      (completed, total) => {
+        if (completed === total || completed - lastReported >= 25) {
+          process.stdout.write(`Graphic alt text: ${completed}/${total}\n`);
+          lastReported = completed;
+        }
+      },
+    );
+    const questions = enrichStoredQuestions(config);
+    process.stdout.write(
+      `${JSON.stringify({ graphicGroups, questions }, null, 2)}\n`,
     );
   });
 

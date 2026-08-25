@@ -3,6 +3,13 @@ import crypto from "node:crypto";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import { REDACTION_VERSION } from "../shared/redact.js";
+import {
+  ENRICHMENT_VERSION,
+  IMAGE_ALT_VERSION,
+  QUESTION_SKILL_TAGS,
+  SKILL_TAG_VERSION,
+} from "../shared/question-enrichment.js";
+import { GRAPHIC_ALT_VERSION } from "../shared/graphic-alt.js";
 import { openDatabase } from "./database.js";
 
 export interface ValidationResult {
@@ -21,6 +28,17 @@ export interface ValidationResult {
     incorrectMissingFlags: ValidationIssueSummary;
     outdatedLatestTestSnapshots: ValidationIssueSummary;
     duplicateCanonicalMedia: ValidationIssueSummary;
+    orphanMediaRows: ValidationIssueSummary;
+    missingQuestionExplanations: ValidationIssueSummary;
+    nonPedagogicalExplanations: ValidationIssueSummary;
+    missingQuestionImageAltText: ValidationIssueSummary;
+    missingGroupImageAltText: ValidationIssueSummary;
+    questionImageAltNeedsReview: ValidationIssueSummary;
+    groupImageAltNeedsReview: ValidationIssueSummary;
+    missingSkillTags: ValidationIssueSummary;
+    genericGrammarSkillTags: ValidationIssueSummary;
+    outdatedQuestionEnrichment: ValidationIssueSummary;
+    outdatedImageAltText: ValidationIssueSummary;
   };
 }
 
@@ -187,8 +205,11 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         .prepare(
           `SELECT DISTINCT COALESCE(m.canonical_url, CAST(m.id AS TEXT)) AS value
            FROM media m
-           JOIN entity_media em ON em.media_id = m.id
-           WHERE m.download_status != 'complete' OR m.local_path IS NULL`,
+           WHERE (
+             EXISTS (SELECT 1 FROM entity_media em WHERE em.media_id = m.id)
+             OR EXISTS (SELECT 1 FROM content_record_media crm WHERE crm.media_id = m.id)
+           )
+             AND (m.download_status != 'complete' OR m.local_path IS NULL)`,
         )
         .all() as Array<{ value: string }>
     ).map((row) => row.value);
@@ -234,6 +255,173 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         )
         .all() as Array<{ value: string }>
     ).map((row) => row.value);
+    const orphanMediaRows = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(canonical_url, CAST(id AS TEXT)) AS value
+           FROM media m
+           WHERE NOT EXISTS (
+             SELECT 1 FROM entity_media em WHERE em.media_id = m.id
+           )
+             AND NOT EXISTS (
+               SELECT 1 FROM content_record_media crm WHERE crm.media_id = m.id
+             )`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const missingQuestionExplanations = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM questions
+           WHERE COALESCE(
+             NULLIF(TRIM(explanation_text), ''),
+             NULLIF(TRIM(explanation_vi), ''),
+             NULLIF(TRIM(explanation_en), '')
+           ) IS NULL`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const nonPedagogicalExplanations = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM questions
+           WHERE explanation_source = 'source_translation'
+              OR (
+                answer_translation IS NOT NULL
+                AND TRIM(COALESCE(explanation_text, '')) = TRIM(answer_translation)
+                AND NULLIF(TRIM(COALESCE(explanation_vi, '')), '') IS NULL
+                AND NULLIF(TRIM(COALESCE(explanation_en, '')), '') IS NULL
+              )
+              OR (
+                NULLIF(TRIM(json_extract(source_payload_json, '$.explanation_vi')), '') IS NULL
+                AND json_extract(source_payload_json, '$.explanation_en') LIKE '%' || char(10) || 'A.%'
+                AND json_extract(source_payload_json, '$.explanation_en') LIKE '%' || char(10) || 'B.%'
+                AND json_extract(source_payload_json, '$.explanation_en') LIKE '%' || char(10) || 'C.%'
+                AND (
+                  explanation_source != 'derived'
+                  OR NULLIF(TRIM(explanation_en), '') IS NOT NULL
+                  OR TRIM(COALESCE(explanation_text, '')) = TRIM(json_extract(source_payload_json, '$.explanation_en'))
+                )
+              )`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const missingQuestionImageAltText = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(q.source_id, CAST(q.id AS TEXT)) AS value
+           FROM questions q
+           WHERE q.image_url IS NOT NULL
+             AND NULLIF(TRIM(q.image_alt_text), '') IS NULL`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const missingGroupImageAltText = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM question_groups
+           WHERE image_url IS NOT NULL
+             AND NULLIF(TRIM(image_alt_text), '') IS NULL`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const questionImageAltNeedsReview = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM questions
+           WHERE image_url IS NOT NULL
+             AND image_alt_needs_review = 1`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const groupImageAltNeedsReview = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM question_groups
+           WHERE image_url IS NOT NULL
+             AND image_alt_needs_review = 1`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const allowedQuestionSkillTags = new Set<string>(QUESTION_SKILL_TAGS);
+    const missingSkillTags = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value,
+                  skill_tags_json AS skillTagsJson
+           FROM questions`,
+        )
+        .all() as Array<{ value: string; skillTagsJson: string }>
+    )
+      .filter((row) => {
+        try {
+          const parsed = JSON.parse(row.skillTagsJson) as unknown;
+          return (
+            !Array.isArray(parsed) ||
+            parsed.length === 0 ||
+            parsed.some(
+              (tag) =>
+                typeof tag !== "string" || !allowedQuestionSkillTags.has(tag),
+            ) ||
+            new Set(parsed).size !== parsed.length
+          );
+        } catch {
+          return true;
+        }
+      })
+      .map((row) => row.value);
+    const genericGrammarSkillTags = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(q.source_id, CAST(q.id AS TEXT)) AS value
+           FROM questions q
+           JOIN parts p ON p.id = q.part_id
+           WHERE p.part_number IN (5, 6)
+             AND NOT EXISTS (
+               SELECT 1
+               FROM json_each(q.skill_tags_json) tag
+               WHERE tag.value NOT IN (
+                 'sentence_completion', 'text_completion',
+                 'grammar'
+               )
+             )`,
+        )
+        .all() as Array<{ value: string }>
+    ).map((row) => row.value);
+    const outdatedQuestionEnrichment = (
+      sqlite
+        .prepare(
+          `SELECT COALESCE(source_id, CAST(id AS TEXT)) AS value
+           FROM questions
+           WHERE enrichment_version IS NULL
+              OR enrichment_version != ?
+              OR skill_tag_version IS NULL
+              OR skill_tag_version != ?`,
+        )
+        .all(ENRICHMENT_VERSION, SKILL_TAG_VERSION) as Array<{ value: string }>
+    ).map((row) => row.value);
+    const outdatedImageAltText = (
+      sqlite
+        .prepare(
+          `SELECT value FROM (
+             SELECT 'question:' || COALESCE(source_id, id) AS value
+             FROM questions
+             WHERE image_url IS NOT NULL
+               AND (image_alt_version IS NULL OR image_alt_version != ?)
+             UNION ALL
+             SELECT 'group:' || COALESCE(source_id, id)
+             FROM question_groups
+             WHERE image_url IS NOT NULL
+               AND (image_alt_version IS NULL OR image_alt_version != ?)
+           )`,
+        )
+        .all(IMAGE_ALT_VERSION, GRAPHIC_ALT_VERSION) as Array<{ value: string }>
+    ).map((row) => row.value);
     return {
       integrity: integrityRow.integrity_check,
       foreignKeyViolations,
@@ -250,6 +438,17 @@ export function validateDatabase(config: AppConfig): ValidationResult {
         incorrectMissingFlags: summarize(incorrectMissingFlags),
         outdatedLatestTestSnapshots: summarize(outdatedLatestTestSnapshots),
         duplicateCanonicalMedia: summarize(duplicateCanonicalMedia),
+        orphanMediaRows: summarize(orphanMediaRows),
+        missingQuestionExplanations: summarize(missingQuestionExplanations),
+        nonPedagogicalExplanations: summarize(nonPedagogicalExplanations),
+        missingQuestionImageAltText: summarize(missingQuestionImageAltText),
+        missingGroupImageAltText: summarize(missingGroupImageAltText),
+        questionImageAltNeedsReview: summarize(questionImageAltNeedsReview),
+        groupImageAltNeedsReview: summarize(groupImageAltNeedsReview),
+        missingSkillTags: summarize(missingSkillTags),
+        genericGrammarSkillTags: summarize(genericGrammarSkillTags),
+        outdatedQuestionEnrichment: summarize(outdatedQuestionEnrichment),
+        outdatedImageAltText: summarize(outdatedImageAltText),
       },
     };
   } finally {

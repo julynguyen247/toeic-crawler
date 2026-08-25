@@ -5,6 +5,11 @@ import { z } from "zod";
 import { SessionProvider } from "../auth/session-provider.js";
 import type { AppConfig } from "../config.js";
 import { contentHash } from "../shared/checksum.js";
+import { buildGraphicAltText } from "../shared/graphic-alt.js";
+import {
+  enrichQuestion,
+  isOptionListTranslation,
+} from "../shared/question-enrichment.js";
 import { ensureDirectory, writeJsonAtomic } from "../shared/files.js";
 import { canonicalizeUrl } from "../shared/redact.js";
 import { openDatabase } from "../storage/database.js";
@@ -420,6 +425,14 @@ function replaceNormalizedTest(
     }
 
     const groupIdBySource = new Map<string, number>();
+    const groupContextBySource = new Map<
+      string,
+      {
+        alt: ReturnType<typeof buildGraphicAltText> | null;
+        contentText: string | null;
+        transcript: string | null;
+      }
+    >();
     for (const passage of [...sourcePassages].sort(
       (a, b) => (a.order_index ?? 0) - (b.order_index ?? 0),
     )) {
@@ -436,6 +449,20 @@ function replaceNormalizedTest(
       ]
         .filter((value): value is string => Boolean(value))
         .join("\n\n");
+      const groupQuestions = sourceQuestions.filter(
+        (question) => question.passage_id === passage.id,
+      );
+      const graphicAlt = passage.image_url
+        ? buildGraphicAltText({
+            questionNumbers: groupQuestions.map(
+              (question) => question.question_number,
+            ),
+            prompts: groupQuestions
+              .map((question) => question.question_text)
+              .filter((value): value is string => Boolean(value)),
+            source: "context",
+          })
+        : null;
       const row = tx
         .insert(questionGroups)
         .values({
@@ -453,6 +480,10 @@ function replaceNormalizedTest(
                 resolveTestMediaUrl(config, passage.image_url, mediaMetadata),
               )
             : null,
+          imageAltText: graphicAlt?.text ?? null,
+          imageAltSource: graphicAlt?.source ?? null,
+          imageAltNeedsReview: graphicAlt?.needsReview ?? false,
+          imageAltVersion: graphicAlt?.version ?? null,
           sourcePayloadJson: JSON.stringify(passage),
           position: passage.order_index ?? 0,
           contentHash: contentHash(passage),
@@ -460,6 +491,11 @@ function replaceNormalizedTest(
         .returning({ id: questionGroups.id })
         .get();
       groupIdBySource.set(passage.id, row.id);
+      groupContextBySource.set(passage.id, {
+        alt: graphicAlt,
+        contentText: contentText || null,
+        transcript: passage.transcript ?? null,
+      });
     }
 
     const questionIdBySource = new Map<string, number>();
@@ -472,13 +508,25 @@ function replaceNormalizedTest(
           `Question ${question.id} references missing Part ${question.part}.`,
         );
       }
-      const explanation = [
-        question.explanation_vi,
-        question.explanation_en,
-        question.dich_nghia_dap_an,
-      ]
+      const optionListTranslation = isOptionListTranslation(question);
+      const normalizedExplanationEn = optionListTranslation
+        ? null
+        : (question.explanation_en ?? null);
+      const explanation = [question.explanation_vi, normalizedExplanationEn]
         .filter((value): value is string => Boolean(value))
         .join("\n\n");
+      const groupContext = question.passage_id
+        ? groupContextBySource.get(question.passage_id)
+        : null;
+      const enrichment = enrichQuestion(question, {
+        groupImageAltText: groupContext?.alt?.text,
+        groupImageAltSource: groupContext?.alt?.source,
+        groupImageAltNeedsReview: groupContext?.alt?.needsReview,
+        groupContentText: groupContext?.contentText,
+        groupTranscript: groupContext?.transcript,
+      });
+      const effectiveExplanation =
+        explanation || enrichment.generatedExplanationVi;
       const row = tx
         .insert(questions)
         .values({
@@ -491,9 +539,12 @@ function replaceNormalizedTest(
           questionNumber: question.question_number,
           promptText: question.question_text ?? null,
           correctChoiceKey: question.correct_answer,
-          explanationText: explanation || null,
-          explanationVi: question.explanation_vi ?? null,
-          explanationEn: question.explanation_en ?? null,
+          explanationText: effectiveExplanation || null,
+          explanationVi:
+            question.explanation_vi ??
+            (explanation ? null : enrichment.generatedExplanationVi),
+          explanationEn: normalizedExplanationEn,
+          explanationSource: enrichment.explanationSource,
           translation: question.dich_nghia ?? null,
           answerTranslation: question.dich_nghia_dap_an ?? null,
           vocabulary: question.tu_vung ?? null,
@@ -513,6 +564,13 @@ function replaceNormalizedTest(
                 resolveTestMediaUrl(config, question.image_url, mediaMetadata),
               )
             : null,
+          imageAltText: enrichment.imageAltText,
+          imageAltSource: enrichment.imageAltSource,
+          imageAltNeedsReview: enrichment.imageAltNeedsReview,
+          imageAltVersion: enrichment.imageAltVersion,
+          skillTagsJson: JSON.stringify(enrichment.skillTags),
+          skillTagVersion: enrichment.skillTagVersion,
+          enrichmentVersion: enrichment.enrichmentVersion,
           position: question.order_index ?? question.question_number,
           contentHash: contentHash(question),
         })
@@ -886,6 +944,123 @@ export function completedTestSourceIds(config: AppConfig): Set<string> {
         .all()
         .map((row) => row.sourceId),
     );
+  } finally {
+    sqlite.close();
+  }
+}
+
+export function synchronizeSyntheticTestTitles(
+  config: AppConfig,
+  candidates: ReadonlyArray<{ testId: string }>,
+): number {
+  const titleBySourceId = new Map(
+    candidates.map((candidate, index) => [
+      candidate.testId,
+      `ETS Full Test ${String(index + 1).padStart(2, "0")}`,
+    ]),
+  );
+  const { sqlite } = openDatabase(config);
+  try {
+    const rows = sqlite
+      .prepare(
+        `SELECT t.id,
+                t.source_id AS sourceId,
+                t.title,
+                t.source_payload_json AS sourcePayloadJson,
+                t.content_hash AS contentHash
+         FROM tests t
+         JOIN collections c ON c.id = t.collection_id
+         WHERE c.source_id = 'accessible-question-bank'`,
+      )
+      .all() as Array<{
+      id: number;
+      sourceId: string;
+      title: string;
+      sourcePayloadJson: string | null;
+      contentHash: string | null;
+    }>;
+    const sourceQuestions = sqlite.prepare(
+      `SELECT q.source_payload_json AS sourcePayloadJson
+       FROM questions q
+       WHERE q.test_id = ?
+       ORDER BY q.question_number`,
+    );
+    const sourcePassages = sqlite.prepare(
+      `SELECT qg.source_payload_json AS sourcePayloadJson
+       FROM question_groups qg
+       JOIN parts p ON p.id = qg.part_id
+       WHERE p.test_id = ?
+       ORDER BY qg.position`,
+    );
+    const updates = rows
+      .map((row) => {
+        const title = titleBySourceId.get(row.sourceId);
+        if (!title || !row.sourcePayloadJson) {
+          return null;
+        }
+        const sourceTest = JSON.parse(row.sourcePayloadJson) as Record<
+          string,
+          unknown
+        >;
+        sourceTest.name = title;
+        const parsePayloads = (
+          values: Array<{ sourcePayloadJson: string | null }>,
+        ) =>
+          values.map((value) => {
+            if (!value.sourcePayloadJson) {
+              throw new Error(
+                `Synthetic test ${row.sourceId} has a missing child source payload.`,
+              );
+            }
+            return JSON.parse(value.sourcePayloadJson) as unknown;
+          });
+        const questionsPayload = parsePayloads(
+          sourceQuestions.all(row.id) as Array<{
+            sourcePayloadJson: string | null;
+          }>,
+        );
+        const passagesPayload = parsePayloads(
+          sourcePassages.all(row.id) as Array<{
+            sourcePayloadJson: string | null;
+          }>,
+        );
+        const nextContentHash = contentHash({
+          sourceTest,
+          sourceQuestions: questionsPayload,
+          sourcePassages: passagesPayload,
+        });
+        return {
+          id: row.id,
+          title,
+          sourcePayloadJson: JSON.stringify(sourceTest),
+          nextContentHash,
+          needsUpdate:
+            row.title !== title ||
+            row.sourcePayloadJson !== JSON.stringify(sourceTest) ||
+            row.contentHash !== nextContentHash,
+        };
+      })
+      .filter((row): row is Exclude<typeof row, null> =>
+        Boolean(row?.needsUpdate),
+      );
+    const update = sqlite.prepare(
+      `UPDATE tests
+       SET title = ?,
+           source_payload_json = ?,
+           content_hash = ?
+       WHERE id = ?`,
+    );
+    sqlite.transaction(() => {
+      for (const row of updates) {
+        update.run(
+          row.title,
+          row.sourcePayloadJson,
+          row.nextContentHash,
+          row.id,
+        );
+      }
+    })();
+    return updates.length;
   } finally {
     sqlite.close();
   }

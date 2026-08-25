@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig } from "../config.js";
 import { ensureDirectory, writeJsonAtomic } from "../shared/files.js";
@@ -22,6 +23,64 @@ function slugify(value: string): string {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "") || "test"
   );
+}
+
+function testSortKey(title: string): [number, number, string] {
+  const localTest = title.match(/^Test\s+(\d+)$/i);
+  if (localTest) {
+    return [0, Number(localTest[1]), title];
+  }
+  const etsTest = title.match(/^ETS Full Test\s+(\d+)$/i);
+  if (etsTest) {
+    return [1, Number(etsTest[1]), title];
+  }
+  return [2, Number.MAX_SAFE_INTEGER, title];
+}
+
+function compareTestsByTitle(a: { title: string }, b: { title: string }) {
+  const left = testSortKey(a.title);
+  const right = testSortKey(b.title);
+  return (
+    left[0] - right[0] || left[1] - right[1] || left[2].localeCompare(right[2])
+  );
+}
+
+function removePreviousSplitFiles(
+  targetDirectory: string,
+  retainedFiles: ReadonlySet<string>,
+): void {
+  const manifestPath = path.join(targetDirectory, "manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    return;
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch {
+    return;
+  }
+  if (!manifest || typeof manifest !== "object") {
+    return;
+  }
+  const files = (manifest as { files?: unknown }).files;
+  if (!Array.isArray(files)) {
+    return;
+  }
+  for (const entry of files) {
+    const file =
+      entry && typeof entry === "object"
+        ? (entry as { file?: unknown }).file
+        : null;
+    if (
+      typeof file !== "string" ||
+      retainedFiles.has(file) ||
+      path.basename(file) !== file ||
+      !/^\d{3}-[a-z0-9-]+\.json$/.test(file)
+    ) {
+      continue;
+    }
+    fs.rmSync(path.join(targetDirectory, file), { force: true });
+  }
 }
 
 function groupBy<T, K>(values: T[], keyOf: (value: T) => K): Map<K, T[]> {
@@ -50,11 +109,31 @@ function withSourcePayload<T extends { sourcePayloadJson?: string | null }>(
   return { ...value, sourcePayload };
 }
 
+function withQuestionEnrichment<
+  T extends { sourcePayloadJson?: string | null; skillTagsJson: string },
+>(row: T) {
+  const { skillTagsJson, ...value } = withSourcePayload(row);
+  let skillTags: string[] = [];
+  try {
+    const parsed = JSON.parse(skillTagsJson) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((tag) => typeof tag === "string")
+    ) {
+      skillTags = parsed;
+    }
+  } catch {
+    skillTags = [];
+  }
+  return { ...value, skillTags };
+}
+
 export interface SplitTestExportResult {
   outputDirectory: string;
   manifestPath: string;
   files: Array<{
-    testId: number;
+    index: number;
+    databaseId: number;
     sourceId: string;
     title: string;
     file: string;
@@ -71,11 +150,7 @@ export function exportTestsToSeparateJson(
   const { db, sqlite } = openDatabase(config);
   try {
     const collectionRows = db.select().from(collections).all();
-    const testRows = db
-      .select()
-      .from(tests)
-      .all()
-      .sort((a, b) => a.id - b.id);
+    const testRows = db.select().from(tests).all().sort(compareTestsByTitle);
     const partRows = db.select().from(parts).all();
     const groupRows = db.select().from(questionGroups).all();
     const questionRows = db.select().from(questions).all();
@@ -121,7 +196,7 @@ export function exportTestsToSeparateJson(
           (a, b) => a.questionNumber - b.questionNumber,
         );
         const questionPayload = (question: (typeof questionRows)[number]) => ({
-          ...withSourcePayload(question),
+          ...withQuestionEnrichment(question),
           choices: (choicesByQuestion.get(question.id) ?? []).sort(
             (a, b) => a.position - b.position,
           ),
@@ -153,7 +228,7 @@ export function exportTestsToSeparateJson(
       });
       const fileName = `${String(testIndex + 1).padStart(3, "0")}-${slugify(test.title)}.json`;
       const payload = {
-        schemaVersion: 3,
+        schemaVersion: 5,
         exportedAt,
         sourceSystem: "dautoeic",
         collection: collectionById.get(test.collectionId) ?? null,
@@ -174,7 +249,8 @@ export function exportTestsToSeparateJson(
       };
       writeJsonAtomic(path.join(targetDirectory, fileName), payload, 0o644);
       files.push({
-        testId: test.id,
+        index: testIndex + 1,
+        databaseId: test.id,
         sourceId: test.sourceId,
         title: test.title,
         file: fileName,
@@ -182,11 +258,15 @@ export function exportTestsToSeparateJson(
       });
     }
 
+    removePreviousSplitFiles(
+      targetDirectory,
+      new Set(files.map((entry) => entry.file)),
+    );
     const manifestPath = path.join(targetDirectory, "manifest.json");
     writeJsonAtomic(
       manifestPath,
       {
-        schemaVersion: 3,
+        schemaVersion: 5,
         exportedAt,
         totalTests: files.length,
         files,
